@@ -1,0 +1,16 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "phone.schema.json",
+  "title": "Phone",
+  "description": "A phone number to start configuration of the moca whatsapp service",
+  "type": "object",
+  "properties": {
+    "phone": {
+      "title": "Phone number",
+      "description": "Phone number in international format",
+      "type": "string",
+      "examples": ["+491711234567", "+442071838750"]
+    }
+  },
+  "required": ["phone"]
+}
