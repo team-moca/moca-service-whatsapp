@@ -238,7 +238,7 @@ func (h Handler) HandleContactList(contacts []whatsapp.Contact) {
 		} else if strings.HasSuffix(contact.Jid, "@broadcast") {
 			// Chat is a broadcast
 		} else {
-			fmt.Printf("[WA-%v CoL] [%v]: Error: Unknown chat type.\n", h.sessionId, contact.Jid)
+			fmt.Printf("[WA-%v CoL] [%v]: Error: Unknown contact type.\n", h.sessionId, contact.Jid)
 		}
 	}
 	b, err := json.Marshal(response)
@@ -253,7 +253,35 @@ func (h Handler) HandleContactList(contacts []whatsapp.Contact) {
 
 // HandleChatList is a list of chats that the user has written with.
 func (h Handler) HandleChatList(chats []whatsapp.Chat) {
+	response := make([]Chat, 0)
+	for _, chat := range chats {
 
+		fmt.Printf("[WA-%v ChL] [%v]: %v\n", h.sessionId, chat.Jid, chat.Name)
+
+		if strings.HasSuffix(chat.Jid, "@c.us") || strings.HasSuffix(chat.Jid, "@s.whatsapp.net") {
+			// Chat is a 1:1 chat
+
+			response = append(response, Chat{
+				chat.Jid,
+				chat.Name,
+				"ChatType.single",
+				[]string{h.conn.Info.Wid, chat.Jid},
+			})
+		} else if strings.HasSuffix(chat.Jid, "@g.us") {
+			// Chat is a group chat
+		} else if strings.HasSuffix(chat.Jid, "@broadcast") {
+			// Chat is a broadcast
+		} else {
+			fmt.Printf("[WA-%v ChL] [%v]: Error: Unknown chat type.\n", h.sessionId, chat.Jid)
+		}
+	}
+	b, err := json.Marshal(response)
+
+	if err != nil {
+		fmt.Printf("[WA-%v ChL]: Error: %v\n", h.sessionId, err)
+	} else {
+		client.Publish("moca/via/whatsapp/"+strconv.Itoa(h.sessionId)+"/chats", 2, false, b)
+	}
 }
 
 func (h Handler) HandleNewContact(contact whatsapp.Contact) {
@@ -296,6 +324,31 @@ func handleConfigureService(client mqtt.Client, msg mqtt.Message) {
 	client.Publish(msg.Topic()+"/response", 2, false, response)
 }
 
+func handleGetContact(client mqtt.Client, msg mqtt.Message) {
+	fmt.Printf("handleGetContact      ")
+	fmt.Printf("[%s]  ", msg.Topic())
+	fmt.Printf("%s\n", msg.Payload())
+	fmt.Println()
+
+	parts := strings.Split(msg.Topic(), "/")
+
+	contact_id := parts[4]
+	phone := getPhoneFromWid(contact_id)
+
+	b, err := json.Marshal(Contact{
+		contact_id,
+		"",
+		phone,
+	})
+
+	if err != nil {
+		fmt.Println("Cannot send response: " + err.Error())
+		return
+	}
+
+	client.Publish(msg.Topic()+"/response", 2, false, b)
+}
+
 func main() {
 	//mqtt.DEBUG = log.New(os.Stdout, "", 0)
 	mqtt.ERROR = log.New(os.Stdout, "", 0)
@@ -311,6 +364,11 @@ func main() {
 	}
 
 	if token := client.Subscribe("whatsapp/+/+/configure", 0, handleConfigureService); token.Wait() && token.Error() != nil {
+		fmt.Println(token.Error())
+		os.Exit(1)
+	}
+
+	if token := client.Subscribe("whatsapp/+/+/get_contact/+", 0, handleGetContact); token.Wait() && token.Error() != nil {
 		fmt.Println(token.Error())
 		os.Exit(1)
 	}
