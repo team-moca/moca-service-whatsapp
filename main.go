@@ -22,6 +22,11 @@ import (
 
 var client mqtt.Client
 
+const (
+	OldUserSuffix = "@c.us"
+	NewUserSuffix = "@s.whatsapp.net"
+)
+
 type Chat struct {
 	ChatId       string   `json:"chat_id"`
 	Name         string   `json:"name"`
@@ -33,6 +38,72 @@ type Contact struct {
 	ContactId string `json:"contact_id"`
 	Name      string `json:"name"`
 	Phone     string `json:"phone"`
+}
+
+type MessageData struct {
+	Type    string `json:"type"`
+	Content string `json:"content,omitempty"`
+}
+
+type Message struct {
+	MessageId string      `json:"message_id"`
+	ContactId string      `json:"contact_id"`
+	ChatId    string      `json:"chat_id"`
+	SentAt    time.Time   `json:"sent_datetime"`
+	Data      MessageData `json:"message"`
+}
+
+type GroupInfo struct {
+	JID      string `json:"jid"`
+	OwnerJID string `json:"owner"`
+
+	Name        string `json:"subject"`
+	NameSetTime int64  `json:"subjectTime"`
+	NameSetBy   string `json:"subjectOwner"`
+
+	Announce bool `json:"announce"` // Can only admins send messages?
+
+	Topic      string `json:"desc"`
+	TopicID    string `json:"descId"`
+	TopicSetAt int64  `json:"descTime"`
+	TopicSetBy string `json:"descOwner"`
+
+	GroupCreated int64 `json:"creation"`
+
+	Status int16 `json:"status"`
+
+	Participants []struct {
+		JID          string `json:"id"`
+		IsAdmin      bool   `json:"isAdmin"`
+		IsSuperAdmin bool   `json:"isSuperAdmin"`
+	} `json:"participants"`
+}
+
+// -> Utils
+func GetJid(jid string) string {
+	return strings.Replace(jid, OldUserSuffix, NewUserSuffix, 1)
+}
+
+func (h Handler) GetGroupMetaData(jid string) (*GroupInfo, error) {
+	data, err := h.conn.GetGroupMetaData(jid)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get group metadata: %v", err)
+	}
+	content := <-data
+
+	info := &GroupInfo{}
+	err = json.Unmarshal([]byte(content), info)
+	if err != nil {
+		return info, fmt.Errorf("failed to unmarshal group metadata: %v", err)
+	}
+
+	for index, participant := range info.Participants {
+		info.Participants[index].JID = GetJid(participant.JID)
+	}
+	info.NameSetBy = GetJid(info.NameSetBy)
+	info.TopicSetBy = GetJid(info.TopicSetBy)
+
+	return info, nil
 }
 
 var _storage = make(map[int]Session)
@@ -186,10 +257,12 @@ func Configure(flowId int, rawMessage []byte) ([]byte, error) {
 		return nil, fmt.Errorf("error while configuring this service: %v", err)
 	}
 
-	// get self contact
-	phone := getPhoneFromWid(sess.Conn.Info.Wid)
+	wid := GetJid(sess.Conn.Info.Wid)
 
-	msg := "{\"step\": \"finished\", \"data\": {\"contact\": {\"contact_id\": \"" + sess.Conn.Info.Wid + "\", \"name\": \"" + sess.Conn.Info.Pushname + "\", \"phone\": \"" + phone + "\"}}}"
+	// get self contact
+	phone := getPhoneFromWid(wid)
+
+	msg := "{\"step\": \"finished\", \"data\": {\"contact\": {\"contact_id\": \"" + wid + "\", \"name\": \"" + sess.Conn.Info.Pushname + "\", \"phone\": \"" + phone + "\"}}}"
 
 	return []byte(msg), nil
 }
@@ -213,10 +286,37 @@ func (Handler) HandleError(err error) {
 // HandleTextMessage receives whatsapp text messages and checks if the message was send by the current
 // user, if it does not contain the keyword '@echo' or if it is from before the program start and then returns.
 // Otherwise the message is echoed back to the original author.
-// func (h Handler) HandleTextMessage(message whatsapp.TextMessage) {
+func (h Handler) HandleTextMessage(message whatsapp.TextMessage) {
 
-// 	fmt.Printf("[WA-%v TM] [%v]: %v from %v\n", h.sessionId, message.Info.Id, message.Text, message.Info.RemoteJid)
-// }
+	fmt.Printf("[WA-%v TM] [%v]: %v from %v\n", h.sessionId, message.Info.Id, message.Text, message.Info.RemoteJid)
+
+	var wid string
+	if message.Info.FromMe {
+		wid = GetJid(h.conn.Info.Wid)
+	} else if message.Info.SenderJid != "" {
+		wid = GetJid(message.Info.SenderJid)
+	} else {
+		wid = GetJid(message.Info.RemoteJid)
+	}
+
+	b, err := json.Marshal([]Message{{
+		message.Info.Id,
+		wid,
+		GetJid(message.Info.RemoteJid),
+		time.Unix(int64(message.Info.Timestamp), 0),
+		MessageData{
+			"text",
+			message.Text,
+		},
+	}})
+
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	client.Publish("moca/via/whatsapp/"+strconv.Itoa(h.sessionId)+"/messages", 2, false, b)
+}
 
 // HandleContactList is a list of chats and groups the user can write to.
 func (h Handler) HandleContactList(contacts []whatsapp.Contact) {
@@ -225,20 +325,22 @@ func (h Handler) HandleContactList(contacts []whatsapp.Contact) {
 
 		fmt.Printf("[WA-%v CoL] [%v]: %v / %v\n", h.sessionId, contact.Jid, contact.Name, contact.Short)
 
-		if strings.HasSuffix(contact.Jid, "@c.us") || strings.HasSuffix(contact.Jid, "@s.whatsapp.net") {
+		jid := GetJid(contact.Jid)
+
+		if strings.HasSuffix(jid, "@s.whatsapp.net") {
 			// Chat is a 1:1 chat
 
 			response = append(response, Contact{
-				contact.Jid,
+				jid,
 				contact.Name,
-				getPhoneFromWid(contact.Jid),
+				getPhoneFromWid(jid),
 			})
-		} else if strings.HasSuffix(contact.Jid, "@g.us") {
+		} else if strings.HasSuffix(jid, "@g.us") {
 			// Chat is a group chat
-		} else if strings.HasSuffix(contact.Jid, "@broadcast") {
+		} else if strings.HasSuffix(jid, "@broadcast") {
 			// Chat is a broadcast
 		} else {
-			fmt.Printf("[WA-%v CoL] [%v]: Error: Unknown contact type.\n", h.sessionId, contact.Jid)
+			fmt.Printf("[WA-%v CoL] [%v]: Error: Unknown contact type.\n", h.sessionId, jid)
 		}
 	}
 	b, err := json.Marshal(response)
@@ -253,26 +355,50 @@ func (h Handler) HandleContactList(contacts []whatsapp.Contact) {
 
 // HandleChatList is a list of chats that the user has written with.
 func (h Handler) HandleChatList(chats []whatsapp.Chat) {
+	wid := GetJid(h.conn.Info.Wid)
 	response := make([]Chat, 0)
 	for _, chat := range chats {
 
-		fmt.Printf("[WA-%v ChL] [%v]: %v\n", h.sessionId, chat.Jid, chat.Name)
+		jid := GetJid(chat.Jid)
+		fmt.Printf("[WA-%v ChL] [%v]: %v\n", h.sessionId, jid, chat.Name)
 
-		if strings.HasSuffix(chat.Jid, "@c.us") || strings.HasSuffix(chat.Jid, "@s.whatsapp.net") {
+		if strings.HasSuffix(jid, "@c.us") || strings.HasSuffix(jid, "@s.whatsapp.net") {
 			// Chat is a 1:1 chat
 
 			response = append(response, Chat{
-				chat.Jid,
+				jid,
 				chat.Name,
 				"ChatType.single",
-				[]string{h.conn.Info.Wid, chat.Jid},
+				[]string{wid, jid},
 			})
-		} else if strings.HasSuffix(chat.Jid, "@g.us") {
+		} else if strings.HasSuffix(jid, "@g.us") {
 			// Chat is a group chat
-		} else if strings.HasSuffix(chat.Jid, "@broadcast") {
-			// Chat is a broadcast
+			g, err := h.GetGroupMetaData(jid)
+
+			if err != nil {
+				continue
+			}
+
+			var participants []string
+			for _, p := range g.Participants {
+				participants = append(participants, p.JID)
+			}
+
+			response = append(response, Chat{
+				jid,
+				chat.Name,
+				"ChatType.group",
+				participants,
+			})
+		} else if strings.HasSuffix(jid, "@broadcast") {
+			response = append(response, Chat{
+				jid,
+				chat.Name,
+				"ChatType.single",
+				[]string{wid},
+			})
 		} else {
-			fmt.Printf("[WA-%v ChL] [%v]: Error: Unknown chat type.\n", h.sessionId, chat.Jid)
+			fmt.Printf("[WA-%v ChL] [%v]: Error: Unknown chat type.\n", h.sessionId, jid)
 		}
 	}
 	b, err := json.Marshal(response)
