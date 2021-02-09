@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/gob"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -20,6 +21,19 @@ import (
 )
 
 var client mqtt.Client
+
+type Chat struct {
+	ChatId       string   `json:"chat_id"`
+	Name         string   `json:"name"`
+	ChatType     string   `json:"chat_type"`    // ChatType.single or ChatType.group
+	Participants []string `json:"participants"` // IDs of participants
+}
+
+type Contact struct {
+	ContactId string `json:"contact_id"`
+	Name      string `json:"name"`
+	Phone     string `json:"phone"`
+}
 
 var _storage = make(map[int]Session)
 
@@ -103,7 +117,7 @@ func NewSession(sessionId int, ws whatsapp.Session) (Session, error) {
 		return Session{}, fmt.Errorf("Error creating session: %v", err)
 	}
 
-	conn.AddHandler(&Handler{ws, sessionId, uint64(time.Now().Unix())})
+	conn.AddHandler(&Handler{ws, conn, sessionId, uint64(time.Now().Unix())})
 
 	fmt.Printf("Starting session for #%d\n", sessionId)
 
@@ -142,8 +156,6 @@ func waLogin(sess Session) error {
 		_, err := sess.Conn.RestoreWithSession(sess.WhatsApp)
 		if err != nil {
 			fmt.Println("Already logged in.")
-
-			return fmt.Errorf("error during session restore: %v", err)
 		}
 
 		// TODO Add message listeners here
@@ -152,6 +164,10 @@ func waLogin(sess Session) error {
 	}
 
 	return nil
+}
+
+func getPhoneFromWid(wid string) string {
+	return "+" + strings.Split(wid, "@")[0]
 }
 
 func Configure(flowId int, rawMessage []byte) ([]byte, error) {
@@ -171,15 +187,16 @@ func Configure(flowId int, rawMessage []byte) ([]byte, error) {
 	}
 
 	// get self contact
-	phone := "+" + strings.TrimSuffix(sess.Conn.Info.Wid, "@c.us")
+	phone := getPhoneFromWid(sess.Conn.Info.Wid)
 
-	msg := "{\"step\": \"finished\", \"contact\": {\"id\": \"" + sess.Conn.Info.Wid + "\", \"name\": \"" + sess.Conn.Info.Pushname + "\", \"phone\": \"" + phone + "\"}}"
+	msg := "{\"step\": \"finished\", \"data\": {\"contact\": {\"contact_id\": \"" + sess.Conn.Info.Wid + "\", \"name\": \"" + sess.Conn.Info.Pushname + "\", \"phone\": \"" + phone + "\"}}}"
 
 	return []byte(msg), nil
 }
 
 type Handler struct {
 	waSession whatsapp.Session
+	conn      *whatsapp.Conn
 	sessionId int
 	startTime uint64
 }
@@ -196,25 +213,74 @@ func (Handler) HandleError(err error) {
 // HandleTextMessage receives whatsapp text messages and checks if the message was send by the current
 // user, if it does not contain the keyword '@echo' or if it is from before the program start and then returns.
 // Otherwise the message is echoed back to the original author.
-func (h Handler) HandleTextMessage(message whatsapp.TextMessage) {
+// func (h Handler) HandleTextMessage(message whatsapp.TextMessage) {
 
-	fmt.Printf("[WA-%v] [%v]: %v from %v\n", h.sessionId, message.Info.Id, message.Text, message.Info.RemoteJid)
+// 	fmt.Printf("[WA-%v TM] [%v]: %v from %v\n", h.sessionId, message.Info.Id, message.Text, message.Info.RemoteJid)
+// }
+
+// HandleContactList is a list of chats and groups the user can write to.
+func (h Handler) HandleContactList(contacts []whatsapp.Contact) {
+	response := make([]Contact, 0)
+	for _, contact := range contacts {
+
+		fmt.Printf("[WA-%v CoL] [%v]: %v / %v\n", h.sessionId, contact.Jid, contact.Name, contact.Short)
+
+		if strings.HasSuffix(contact.Jid, "@c.us") || strings.HasSuffix(contact.Jid, "@s.whatsapp.net") {
+			// Chat is a 1:1 chat
+
+			response = append(response, Contact{
+				contact.Jid,
+				contact.Name,
+				getPhoneFromWid(contact.Jid),
+			})
+		} else if strings.HasSuffix(contact.Jid, "@g.us") {
+			// Chat is a group chat
+		} else if strings.HasSuffix(contact.Jid, "@broadcast") {
+			// Chat is a broadcast
+		} else {
+			fmt.Printf("[WA-%v CoL] [%v]: Error: Unknown chat type.\n", h.sessionId, contact.Jid)
+		}
+	}
+	b, err := json.Marshal(response)
+
+	if err != nil {
+		fmt.Printf("[WA-%v CoL]: Error: %v\n", h.sessionId, err)
+	} else {
+		client.Publish("moca/via/whatsapp/"+strconv.Itoa(h.sessionId)+"/contacts", 2, false, b)
+	}
+
 }
+
+// HandleChatList is a list of chats that the user has written with.
+func (h Handler) HandleChatList(chats []whatsapp.Chat) {
+
+}
+
+func (h Handler) HandleNewContact(contact whatsapp.Contact) {
+
+	fmt.Printf("[WA-%v NC] [%v]: %v (%v)\n", h.sessionId, contact.Jid, contact.Name, contact.Short)
+}
+
+// func (Handler) HandleJsonMessage(message string) {
+// 	fmt.Println("JSON: %w", message)
+// }
 
 func cleanup() {
 	fmt.Println("Cleanup now.")
 	client.Disconnect(250)
 }
 
-// handleConfigureService handles mqtt messages for the topic `whatsapp/configure/{connector_id}`.
-// It will publish a response `whatsapp/configure/{connector_id}/response` which contains a `step` id and the required data described in `schema` as a JSON schema.
+// handleConfigureService handles mqtt messages for the topic `whatsapp/{connector_id}/{uuid}/configure`.
+// It will publish a response `whatsapp/{connector_id}/{uuid}/configure/response` which contains a `step` id and the required data described in `schema` as a JSON schema.
 func handleConfigureService(client mqtt.Client, msg mqtt.Message) {
 	fmt.Printf("handleConfigureService      ")
 	fmt.Printf("[%s]  ", msg.Topic())
 	fmt.Printf("%s\n", msg.Payload())
 	fmt.Println()
 
-	connector_id, err := strconv.Atoi(msg.Topic()[19:])
+	parts := strings.Split(msg.Topic(), "/")
+
+	connector_id, err := strconv.Atoi(parts[1])
 
 	if err != nil {
 		fmt.Println("connector_id must be an int.")
@@ -244,7 +310,7 @@ func main() {
 		panic(token.Error())
 	}
 
-	if token := client.Subscribe("whatsapp/configure/+", 0, handleConfigureService); token.Wait() && token.Error() != nil {
+	if token := client.Subscribe("whatsapp/+/+/configure", 0, handleConfigureService); token.Wait() && token.Error() != nil {
 		fmt.Println(token.Error())
 		os.Exit(1)
 	}
