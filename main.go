@@ -54,6 +54,11 @@ type Message struct {
 	Data      MessageData `json:"message"`
 }
 
+type SendMessage struct {
+	ChatId  string      `json:"chat_id"`
+	Message MessageData `json:"message"`
+}
+
 type GroupInfo struct {
 	JID      string `json:"jid"`
 	OwnerJID string `json:"owner"`
@@ -151,6 +156,12 @@ func Get(sessionId int) (Session, error) {
 	}
 
 	return s, nil
+}
+
+func DeleteSession(sessionId int) error {
+	_storage[sessionId] = Session{}
+
+	return fmt.Errorf("Cannot delete session: %w", os.Remove(".sessions/"+strconv.Itoa(sessionId)+".gob"))
 }
 
 func Save(s Session) error {
@@ -476,6 +487,92 @@ func handleGetContact(client mqtt.Client, msg mqtt.Message) {
 	client.Publish(msg.Topic()+"/response", 2, false, b)
 }
 
+func handleSendMessage(client mqtt.Client, msg mqtt.Message) {
+	fmt.Printf("handleSendMessage      ")
+	fmt.Printf("[%s]  ", msg.Topic())
+	fmt.Printf("%s\n", msg.Payload())
+	fmt.Println()
+
+	parts := strings.Split(msg.Topic(), "/")
+
+	connector_id, err := strconv.Atoi(parts[1])
+
+	if err != nil {
+		fmt.Println("Cannot parse connector_id.")
+		return
+	}
+
+	sess, err := Get(connector_id)
+
+	if err != nil {
+		fmt.Println("Cannot send response: " + err.Error())
+		return
+	}
+
+	message := &SendMessage{}
+	err = json.Unmarshal(msg.Payload(), message)
+
+	if err != nil {
+		fmt.Println("Cannot send response: " + err.Error())
+		return
+	}
+
+	id, _ := sess.Conn.Send(whatsapp.TextMessage{
+		Info: whatsapp.MessageInfo{
+			RemoteJid: message.ChatId,
+		},
+		Text: message.Message.Content,
+	})
+
+	client.Publish(msg.Topic()+"/response", 2, false, "{\"message_id\": \""+id+"\"}")
+}
+
+func handleDeleteConnector(client mqtt.Client, msg mqtt.Message) {
+	fmt.Printf("handleDeleteConnector      ")
+	fmt.Printf("[%s]  ", msg.Topic())
+	fmt.Printf("%s\n", msg.Payload())
+	fmt.Println()
+
+	parts := strings.Split(msg.Topic(), "/")
+
+	connector_id, err := strconv.Atoi(parts[1])
+
+	if err != nil {
+		fmt.Println("Cannot parse connector_id.")
+		return
+	}
+
+	sess, err := Get(connector_id)
+
+	if err != nil {
+		fmt.Println("Cannot delete connector: " + err.Error())
+		return
+	}
+
+	message := &SendMessage{}
+	err = json.Unmarshal(msg.Payload(), message)
+
+	if err != nil {
+		fmt.Println("Cannot delete connector: " + err.Error())
+		return
+	}
+
+	err = sess.Conn.Logout()
+
+	if err != nil {
+		fmt.Println("Cannot delete connector: " + err.Error())
+		return
+	}
+
+	err = DeleteSession(connector_id)
+
+	if err != nil {
+		fmt.Println("Error during delete connector: " + err.Error())
+	}
+
+	client.Publish(msg.Topic()+"/response", 2, false, "{\"success\": true}")
+}
+
 func main() {
 	//mqtt.DEBUG = log.New(os.Stdout, "", 0)
 	mqtt.ERROR = log.New(os.Stdout, "", 0)
@@ -520,6 +617,16 @@ func main() {
 	}
 
 	if token := client.Subscribe("whatsapp/+/+/get_contact/+", 0, handleGetContact); token.Wait() && token.Error() != nil {
+		fmt.Println(token.Error())
+		os.Exit(1)
+	}
+
+	if token := client.Subscribe("whatsapp/+/+/send_message", 0, handleSendMessage); token.Wait() && token.Error() != nil {
+		fmt.Println(token.Error())
+		os.Exit(1)
+	}
+
+	if token := client.Subscribe("whatsapp/+/+/delete_connector", 0, handleDeleteConnector); token.Wait() && token.Error() != nil {
 		fmt.Println(token.Error())
 		os.Exit(1)
 	}
