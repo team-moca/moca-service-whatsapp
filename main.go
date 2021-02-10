@@ -4,6 +4,7 @@ import (
 	"encoding/gob"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"os"
 	"os/signal"
@@ -288,7 +289,7 @@ func (Handler) HandleError(err error) {
 // Otherwise the message is echoed back to the original author.
 func (h Handler) HandleTextMessage(message whatsapp.TextMessage) {
 
-	fmt.Printf("[WA-%v TM] [%v]: %v from %v\n", h.sessionId, message.Info.Id, message.Text, message.Info.RemoteJid)
+	// fmt.Printf("[WA-%v TM] [%v]: %v from %v\n", h.sessionId, message.Info.Id, message.Text, message.Info.RemoteJid)
 
 	var wid string
 	if message.Info.FromMe {
@@ -323,7 +324,7 @@ func (h Handler) HandleContactList(contacts []whatsapp.Contact) {
 	response := make([]Contact, 0)
 	for _, contact := range contacts {
 
-		fmt.Printf("[WA-%v CoL] [%v]: %v / %v\n", h.sessionId, contact.Jid, contact.Name, contact.Short)
+		// fmt.Printf("[WA-%v CoL] [%v]: %v / %v\n", h.sessionId, contact.Jid, contact.Name, contact.Short)
 
 		jid := GetJid(contact.Jid)
 
@@ -360,7 +361,7 @@ func (h Handler) HandleChatList(chats []whatsapp.Chat) {
 	for _, chat := range chats {
 
 		jid := GetJid(chat.Jid)
-		fmt.Printf("[WA-%v ChL] [%v]: %v\n", h.sessionId, jid, chat.Name)
+		// fmt.Printf("[WA-%v ChL] [%v]: %v\n", h.sessionId, jid, chat.Name)
 
 		if strings.HasSuffix(jid, "@c.us") || strings.HasSuffix(jid, "@s.whatsapp.net") {
 			// Chat is a 1:1 chat
@@ -487,6 +488,30 @@ func main() {
 	client = mqtt.NewClient(opts)
 	if token := client.Connect(); token.Wait() && token.Error() != nil {
 		panic(token.Error())
+	}
+
+	// Restore existing sessions
+	fi, err := ioutil.ReadDir(".sessions")
+
+	if err != nil {
+		fmt.Printf("Error restoring existing sessions: %v\n", err)
+	} else {
+		for _, s := range fi {
+			if !s.IsDir() {
+				id, err := strconv.Atoi(strings.TrimRight(s.Name(), ".gob"))
+
+				if err == nil {
+					fmt.Printf("Found session: %d\n", id)
+
+					sess, err := Get(id)
+
+					if err == nil {
+						waLogin(sess)
+					}
+				}
+
+			}
+		}
 	}
 
 	if token := client.Subscribe("whatsapp/+/+/configure", 0, handleConfigureService); token.Wait() && token.Error() != nil {
