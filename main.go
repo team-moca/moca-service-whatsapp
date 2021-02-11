@@ -330,6 +330,65 @@ func (h Handler) HandleTextMessage(message whatsapp.TextMessage) {
 	client.Publish("moca/via/whatsapp/"+strconv.Itoa(h.sessionId)+"/messages", 2, false, b)
 }
 
+//Example for media handling. Video, Audio, Document are also possible in the same way
+func (h Handler) HandleImageMessage(message whatsapp.ImageMessage) {
+	var wid string
+	if message.Info.FromMe {
+		wid = GetJid(h.conn.Info.Wid)
+	} else if message.Info.SenderJid != "" {
+		wid = GetJid(message.Info.SenderJid)
+	} else {
+		wid = GetJid(message.Info.RemoteJid)
+	}
+
+	data, err := message.Download()
+	if err != nil {
+		if err != whatsapp.ErrMediaDownloadFailedWith410 && err != whatsapp.ErrMediaDownloadFailedWith404 {
+			fmt.Printf("Can't download image: %v", err)
+			return
+		}
+		if _, err = h.conn.LoadMediaInfo(message.Info.RemoteJid, message.Info.Id, strconv.FormatBool(message.Info.FromMe)); err == nil {
+			data, err = message.Download()
+			if err != nil {
+				fmt.Printf("Can't download image (B): %v", err)
+				return
+			}
+		}
+	}
+	filename := fmt.Sprintf("downloads/%v/%v.%v", wid, message.Info.Id, strings.Split(message.Type, "/")[1])
+	os.MkdirAll(fmt.Sprintf("downloads/%s", wid), os.ModePerm)
+	file, err := os.Create(filename)
+	defer file.Close()
+	if err != nil {
+		fmt.Printf("Can't download image (C): %v", err)
+		return
+	}
+	_, err = file.Write(data)
+	if err != nil {
+		fmt.Printf("Can't save image: %v", err)
+		return
+	}
+	log.Printf("%v %v\n\timage received, saved at:%v\n", message.Info.Timestamp, message.Info.RemoteJid, filename)
+
+	b, err := json.Marshal([]Message{{
+		message.Info.Id,
+		wid,
+		GetJid(message.Info.RemoteJid),
+		time.Unix(int64(message.Info.Timestamp), 0),
+		MessageData{
+			"image",
+			message.Caption,
+		},
+	}})
+
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	client.Publish("moca/via/whatsapp/"+strconv.Itoa(h.sessionId)+"/messages", 2, false, b)
+}
+
 // HandleContactList is a list of chats and groups the user can write to.
 func (h Handler) HandleContactList(contacts []whatsapp.Contact) {
 	response := make([]Contact, 0)
