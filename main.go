@@ -1,11 +1,13 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/gob"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"reflect"
@@ -88,6 +90,22 @@ type GroupInfo struct {
 // -> Utils
 func GetJid(jid string) string {
 	return strings.Replace(jid, OldUserSuffix, NewUserSuffix, 1)
+}
+
+// Max returns the larger of x or y.
+func Max(x, y int) int {
+	if x < y {
+		return y
+	}
+	return x
+}
+
+// Min returns the smaller of x or y.
+func Min(x, y int) int {
+	if x > y {
+		return y
+	}
+	return x
 }
 
 func (h Handler) GetGroupMetaData(jid string) (*GroupInfo, error) {
@@ -330,45 +348,61 @@ func (h Handler) HandleTextMessage(message whatsapp.TextMessage) {
 	client.Publish("moca/via/whatsapp/"+strconv.Itoa(h.sessionId)+"/messages", 2, false, b)
 }
 
-//Example for media handling. Video, Audio, Document are also possible in the same way
-func (h Handler) HandleImageMessage(message whatsapp.ImageMessage) {
+func GetWidFromMessageInfo(conn *whatsapp.Conn, info whatsapp.MessageInfo) string {
 	var wid string
-	if message.Info.FromMe {
-		wid = GetJid(h.conn.Info.Wid)
-	} else if message.Info.SenderJid != "" {
-		wid = GetJid(message.Info.SenderJid)
+	if info.FromMe {
+		wid = GetJid(conn.Info.Wid)
+	} else if info.SenderJid != "" {
+		wid = GetJid(info.SenderJid)
 	} else {
-		wid = GetJid(message.Info.RemoteJid)
+		wid = GetJid(info.RemoteJid)
+	}
+	return wid
+}
+
+func DownloadMedia(conn *whatsapp.Conn, connectorId int, chatId string, messageId string, message whatsapp.ImageMessage) error {
+	filename := fmt.Sprintf("downloads/%v/%v/%v", connectorId, chatId, messageId) // EXT: strings.Split(message.Type, "/")[1]
+	if isMedia(connectorId, chatId, messageId) {
+		// Media already exists
+		return fmt.Errorf("Media already exists.")
 	}
 
 	data, err := message.Download()
 	if err != nil {
 		if err != whatsapp.ErrMediaDownloadFailedWith410 && err != whatsapp.ErrMediaDownloadFailedWith404 {
-			fmt.Printf("Can't download image: %v", err)
-			return
+			return fmt.Errorf("Can't download media: %w", err)
 		}
-		if _, err = h.conn.LoadMediaInfo(message.Info.RemoteJid, message.Info.Id, strconv.FormatBool(message.Info.FromMe)); err == nil {
+		if _, err = conn.LoadMediaInfo(message.Info.RemoteJid, messageId, strconv.FormatBool(message.Info.FromMe)); err == nil {
 			data, err = message.Download()
 			if err != nil {
-				fmt.Printf("Can't download image (B): %v", err)
-				return
+				return fmt.Errorf("Can't download media: %w", err)
 			}
 		}
 	}
-	filename := fmt.Sprintf("downloads/%v/%v.%v", wid, message.Info.Id, strings.Split(message.Type, "/")[1])
-	os.MkdirAll(fmt.Sprintf("downloads/%s", wid), os.ModePerm)
+	os.MkdirAll(fmt.Sprintf("downloads/%v/%s", connectorId, chatId), os.ModePerm)
 	file, err := os.Create(filename)
 	defer file.Close()
 	if err != nil {
-		fmt.Printf("Can't download image (C): %v", err)
-		return
+		return fmt.Errorf("Can't download media: %w", err)
 	}
 	_, err = file.Write(data)
 	if err != nil {
-		fmt.Printf("Can't save image: %v", err)
+		return fmt.Errorf("Can't download media: %w", err)
+	}
+
+	return nil
+}
+
+//Example for media handling. Video, Audio, Document are also possible in the same way
+func (h Handler) HandleImageMessage(message whatsapp.ImageMessage) {
+
+	wid := GetWidFromMessageInfo(h.conn, message.Info)
+
+	err := DownloadMedia(h.conn, h.sessionId, wid, message.Info.Id, message)
+
+	if err != nil {
 		return
 	}
-	log.Printf("%v %v\n\timage received, saved at:%v\n", message.Info.Timestamp, message.Info.RemoteJid, filename)
 
 	b, err := json.Marshal([]Message{{
 		message.Info.Id,
@@ -586,6 +620,87 @@ func handleSendMessage(client mqtt.Client, msg mqtt.Message) {
 	client.Publish(msg.Topic()+"/response", 2, false, "{\"message_id\": \""+id+"\"}")
 }
 
+func isMedia(connector_id int, chat_id string, message_id string) bool {
+
+	path := fmt.Sprintf("downloads/%d/%v/%v", connector_id, chat_id, message_id)
+
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return false
+	}
+
+	return true
+}
+
+func getMedia(connector_id int, chat_id string, message_id string) ([]byte, error) {
+
+	path := fmt.Sprintf("downloads/%d/%v/%v", connector_id, chat_id, message_id)
+
+	b, err := ioutil.ReadFile(path)
+
+	if err != nil {
+		return nil, fmt.Errorf("Cannot read media file at path %v: %w", path, err)
+	}
+
+	return b, nil
+}
+
+func handleGetMedia(client mqtt.Client, msg mqtt.Message) {
+	fmt.Printf("handleGetMedia      ")
+	fmt.Printf("[%s]  ", msg.Topic())
+	fmt.Printf("%s\n", msg.Payload())
+	fmt.Println()
+
+	parts := strings.Split(msg.Topic(), "/")
+
+	connector_id, err := strconv.Atoi(parts[1])
+	chat_id := parts[4]
+	message_id := parts[6]
+
+	if err != nil {
+		fmt.Println("Cannot parse connector_id.")
+		return
+	}
+
+	b, err := getMedia(connector_id, chat_id, message_id)
+
+	if err != nil {
+		fmt.Println("Cannot open media file: %w", err)
+		return
+	}
+
+	var mime string
+
+	for i := 0; i < len(b); i += 1048576 {
+
+		end := Min(i+1048575, len(b))
+
+		bts := b[i:end]
+		data := fmt.Sprintf("%q", Base64Encode(bts))
+
+		if i == 0 {
+			// Only in first run...
+			mime = http.DetectContentType(bts)
+		}
+
+		// send
+		client.Publish(msg.Topic()+"/response", 2, false, "{\"data\": "+data+"}")
+
+		if i+1048575 > len(b) {
+			// End of array reached...
+			break
+		}
+
+	}
+	filename := fmt.Sprintf("whatsapp_%d_%v_%v", connector_id, chat_id, message_id)
+	client.Publish(msg.Topic()+"/response", 2, false, "{\"data\": null, \"filename\": \""+filename+"\", \"mime\": \""+mime+"\"}")
+}
+
+func Base64Encode(message []byte) []byte {
+	b := make([]byte, base64.StdEncoding.EncodedLen(len(message)))
+	base64.StdEncoding.Encode(b, message)
+	return b
+}
+
 func handleDeleteConnector(client mqtt.Client, msg mqtt.Message) {
 	fmt.Printf("handleDeleteConnector      ")
 	fmt.Printf("[%s]  ", msg.Topic())
@@ -681,6 +796,11 @@ func main() {
 	}
 
 	if token := client.Subscribe("whatsapp/+/+/send_message", 0, handleSendMessage); token.Wait() && token.Error() != nil {
+		fmt.Println(token.Error())
+		os.Exit(1)
+	}
+
+	if token := client.Subscribe("whatsapp/+/+/chats/+/messages/+/get_media", 0, handleGetMedia); token.Wait() && token.Error() != nil {
 		fmt.Println(token.Error())
 		os.Exit(1)
 	}
