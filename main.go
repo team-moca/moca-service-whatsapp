@@ -750,7 +750,7 @@ func handleDeleteConnector(client mqtt.Client, msg mqtt.Message) {
 func main() {
 	//mqtt.DEBUG = log.New(os.Stdout, "", 0)
 	mqtt.ERROR = log.New(os.Stdout, "", 0)
-	opts := mqtt.NewClientOptions().AddBroker("tcp://localhost:1883").SetClientID("WA-" + uuid.New().String())
+	opts := mqtt.NewClientOptions().AddBroker("tcp://mqtt:1883").SetClientID("WA-" + uuid.New().String())
 	opts.SetKeepAlive(2 * time.Second)
 	opts.SetDefaultPublishHandler(f)
 	opts.SetPingTimeout(1 * time.Second)
