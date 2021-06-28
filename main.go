@@ -146,7 +146,7 @@ func Get(sessionId int) (Session, error) {
 
 		path := ".sessions/" + strconv.Itoa(sessionId) + ".gob"
 
-		if _, err := os.Stat(path); os.IsNotExist(err) {
+		if _, err := os.Stat(path); err == nil {
 			// Session does not yet exist
 
 			_storage[sessionId] = s
@@ -247,7 +247,7 @@ func waLogin(sess Session) error {
 
 		err = Save(sess)
 		if err != nil {
-			return fmt.Errorf("error during login: %v", err)
+			return fmt.Errorf("error during session saving: %v", err)
 		}
 
 		fmt.Println("Login seemed to have been successful.")
