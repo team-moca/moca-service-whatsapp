@@ -468,7 +468,7 @@ func (h Handler) HandleChatList(chats []whatsapp.Chat) {
 	for _, chat := range chats {
 
 		jid := GetJid(chat.Jid)
-		// fmt.Printf("[WA-%v ChL] [%v]: %v\n", h.sessionId, jid, chat.Name)
+		fmt.Printf("[WA-%v ChL] [%v]: %v\n", h.sessionId, jid, chat.Name)
 
 		if strings.HasSuffix(jid, "@c.us") || strings.HasSuffix(jid, "@s.whatsapp.net") {
 			// Chat is a 1:1 chat
