@@ -134,6 +134,8 @@ var _storage = make(map[int]Session)
 
 func Get(sessionId int) (Session, error) {
 
+	fmt.Printf("Get session #%d\n", sessionId)
+
 	s, found := _storage[sessionId]
 	if !found {
 		fmt.Printf("Session not in cache. Try to load it from disk now...\n")
@@ -146,12 +148,16 @@ func Get(sessionId int) (Session, error) {
 
 		path := ".sessions/" + strconv.Itoa(sessionId) + ".gob"
 
-		if _, err := os.Stat(path); err == nil {
+		if _, err := os.Stat(path); os.IsNotExist(err) {
 			// Session does not yet exist
+			fmt.Println("Error exists!")
+			fmt.Println(err)
 
 			_storage[sessionId] = s
 			return s, nil
 		}
+
+		fmt.Println("Session seems to already exist on disk, but is not loaded")
 
 		file, err := os.Open(path)
 		if err != nil {
