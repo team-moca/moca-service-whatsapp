@@ -369,9 +369,6 @@ func DownloadMedia(conn *whatsapp.Conn, connectorId int, chatId string, messageI
 
 	data, err := message.Download()
 	if err != nil {
-		if err != whatsapp.ErrMediaDownloadFailedWith410 && err != whatsapp.ErrMediaDownloadFailedWith404 {
-			return fmt.Errorf("Can't download media: %w", err)
-		}
 		if _, err = conn.LoadMediaInfo(message.Info.RemoteJid, messageId, strconv.FormatBool(message.Info.FromMe)); err == nil {
 			data, err = message.Download()
 			if err != nil {
